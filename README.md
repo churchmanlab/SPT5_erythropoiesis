@@ -26,3 +26,4 @@ functional_analysis.Rmd
 ### Further NET-seq data analysis, metagene and pausing index:
 
 PI_Jan2023.Rmd
+Metagene_Plotting_Final.R
