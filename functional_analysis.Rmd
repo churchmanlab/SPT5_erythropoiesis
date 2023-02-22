@@ -1,0 +1,159 @@
+---
+title: "Functional analysis: RNAseq"
+author: "Danya Martell"
+date: "10/16/2019"
+output:
+  html_document: default
+---
+GO Enrichment Analysis with padj of 0.05 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,        # Hide messages/warnings/errors from loading packages
+                      warning = FALSE,
+                      error = FALSE,
+                      cache = FALSE)           # By default, cache results to avoid re-running
+                                              # super long things every time you knit
+
+
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("org.Hs.eg.db")
+
+## Setup
+library(org.Hs.eg.db)
+library(DOSE)
+library(pathview)
+library(purrr)
+library(clusterProfiler)
+library(annotables)
+library(enrichplot)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# sessionInfo()
+```
+###Load files Day 2
+```{r}
+res_table <- read.csv(file = "results/resultsTable.csv")
+sig <- read.csv(file = "results/SigDifferentiallyExpressedGenes.csv")
+
+```
+# GO enrichment analysis for edited cells
+```{r}
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+all_genes <- res_table$gene
+
+sig_genes <- sig$gene
+
+## Run GO enrichment analysis Biological Process (BP)
+ego_BP <- enrichGO(gene = sig_genes, 
+                universe = all_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable = TRUE)
+
+## Run GO enrichment analysis Molecular Function (MF)
+ego_MF <- enrichGO(gene = sig_genes, 
+                universe = all_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "MF", 
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable = TRUE)
+
+## Run GO enrichment analysis Cellular component (CC)
+ego_CC <- enrichGO(gene = sig_genes, 
+                universe = all_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "CC", 
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summaryBP <- data.frame(ego_BP)
+cluster_summaryMF <- data.frame(ego_MF)
+cluster_summaryCC <- data.frame(ego_CC)
+
+write.csv(cluster_summaryBP, "results/clusterProfilerBP.csv")
+write.csv(cluster_summaryMF, "results/clusterProfilerMF.csv")
+write.csv(cluster_summaryCC, "results/clusterProfilerCC.csv")
+```
+
+# Visualizing results from GO enrichmant analysis
+```{r}
+## Dotplot BP
+dotplot(ego_BP, showCategory=12)
+#export as PDF, landscape
+
+## Enrichmap clusters the 50 most significant (by padj) GO terms to visualize relationships between terms
+emapplot(ego_BP, showCategory = 12)
+
+## To color genes by log2 fold changes, we need to extract the log2 fold changes from our results table creating a named vector
+SPT5_foldchanges <- sig$log2FoldChange
+
+names(SPT5_foldchanges) <- sig$gene
+
+## Cnetplot details the genes associated with one or more terms - by default gives the top 5 significant terms (by padj)
+cnetplot(ego_BP, 
+         categorySize="pvalue", 
+         showCategory = 5, 
+         foldChange=SPT5_foldchanges, 
+         vertex.label.font=6)
+
+## Gene-concept network
+cnetplot(ego_BP, foldChange=SPT5_foldchanges, showCategory = 5, circular = TRUE, colorEdge = TRUE)
+
+## Heatmap-like functional classification         
+heatplot(ego_BP, foldChange=SPT5_foldchanges, showCategory = 10)
+
+
+## The upsetplot is an alternative to cnetplot for visualizing the complex association between genes and gene sets. It emphasizes the gene overlapping among different gene sets.
+upsetplot(ego_BP,12)
+
+```
+
+Sig up and sig down
+```{r}
+sig_UP <- sig[which(sig$log2FoldChange > 2),]
+sig_up <- sig_UP$gene
+
+sig_DOWN <- sig[which(sig$log2FoldChange < 2),]
+sig_down <- sig_DOWN$gene
+
+ego_up <- enrichGO(gene = sig_up, 
+                universe = all_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable = TRUE)
+
+ego_down <- enrichGO(gene = sig_down, 
+                universe = all_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable = TRUE)
+
+cluster_summaryBPup <- data.frame(ego_up)
+cluster_summaryBPdown <- data.frame(ego_down)
+
+write.csv(cluster_summaryBPup, "results/clusterProfilerBPup.csv")
+write.csv(cluster_summaryBPdown, "results/clusterProfilerBPdown.csv")
+
+```

@@ -1,0 +1,389 @@
+
+---
+title: "Differential gene expression analysis: RNAseq"
+author: "Danya Martell"
+date: "10/15/2019"
+output:
+  html_document: default
+---
+Differential gene expression (DGE) analysis overview
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(message = FALSE,        # Hide messages/warnings/errors from loading packages
+                      warning = FALSE,
+                      error = FALSE,
+                      echo  = FALSE,
+                      cache = FALSE)           # By default, cache results to avoid re-running
+                                              # super long things every time you knit
+
+## Setup
+library(stringi)
+library(data.table)
+library(digest)
+library(broom)
+library(devtools)
+library(annotables)
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(pheatmap)
+library(ggrepel)
+library(cowplot)
+library(clusterProfiler)
+library(DEGreport)
+library(org.Hs.eg.db)
+library(DOSE)
+library(pathview)
+library(purrr)
+library(rhdf5)
+library(tximport)
+library(annotables)
+# library(wasabi)
+# library(sleuth)
+library(biomaRt)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+#library(limma)
+
+remove(gene.idtype.bods, gene.idtype.list, korg, cpd.simtypes)
+```
+Retrieve the annotations from Biomart:  
+```{r}
+# mart = useMart(biomart = "ensembl", dataset = "hsapien_gene_ensembl")
+# 
+# 
+# geneID2name = getBM(attributes = c("ensembl_gene_id","external_gene_name","description"),mart=mart)
+# #sort first by ensID (to have gnsdf and geneID2name match transcripts), then assign new column
+# 
+# # Select the columns of interest
+# geneID2name <- dplyr::select(geneID2name, ensembl_gene_id, external_gene_name, description)
+# colnames(geneID2name) <- c("gene","gene_name","description")
+
+#write.csv(geneID2name, file = "geneID2name.csv")
+geneID2name <- read_csv("geneID2name.csv")
+geneID2name[1] <- NULL
+
+```
+counts
+```{r}
+#get counts from featureCounts
+counts_all <- read.csv("data/counts_all.csv", sep=",", header=T)
+rownames(counts_all) <- counts_all$gene
+counts_all[1] <- NULL
+
+## Create a sampletable/metadata
+samplename <- colnames(counts)
+batch <- factor(c(rep(c("3875","3881","3893"), 2)))
+sampletype <- factor(c(rep("AAVS1", 3), rep("SPT5",3)))
+meta <- data.frame(sampletype, batch, samplename, row.names = colnames(counts))
+```
+#### Modeling count data
+
+Check that the negative-binomial model is a good approximation for data by looking at the mean-variance relationship (works where the mean < variance, as is the case with RNA-Seq count data).
+
+```{r}
+##WT
+mean_counts <- apply(counts[, 1:6], 1, mean)
+variance_counts <- apply(counts[, 1:6], 1, var)
+df <- data.frame(mean_counts, variance_counts)
+
+ggplot(df) +
+        geom_point(aes(x=mean_counts, y=variance_counts)) + 
+        geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+        scale_y_log10() +
+        scale_x_log10()
+```
+
+### Count normalization of dataset using DESeq2
+
+Looking at the differences between SPT5-edited and AAVS1-edited cells while taking batch effect (donor variability) into account
+
+#### Create DESEq2 object
+
+```{r}
+## Define design interaction
+meta$sampletype <- relevel(meta$sampletype, "AAVS1")
+
+## Create DESeq2Dataset object
+dds <- DESeqDataSetFromMatrix(counts, colData = meta, design = ~ batch + sampletype)
+#Including the batch in your design formula (~ batch + sampletype) will model the batch effect in the regression step, which means that the raw data are not modified (so the batch effect is not removed), but instead the regression will estimate the size of the batch effect and subtract it out when performing all other tests. In addition, the model's residual degrees of freedom will be reduced appropriately to reflect the fact that some degrees of freedom were "spent" modelling the batch effects.
+
+```
+#### Generate the normalized counts
+
+```{r}
+#estimating normalization factors
+dds <- estimateSizeFactors(dds)
+sf_dds <- sizeFactors(dds)
+sf_dds
+
+#retrieve the normalized counts matrix from dds, we use the counts() function and add the argument normalized=TRUE
+normalized_count <- counts(dds, normalized=TRUE)
+
+```
+
+# Data quality assessment and exploratory analysis
+
+```{r}
+### Transform counts for data visualization
+rld <- rlog(dds, blind=TRUE)
+
+# Estimate dispersion
+dds <- estimateDispersions(dds)
+plotDispEsts(dds)
+```
+
+# Principal components analysis (PCA)
+
+
+### Apply variance stabilizing transformation
+
+```{r}
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE, fitType = "parametric")
+vstData <- getVarianceStabilizedData(dds)
+vstData <- data.frame(vstData)
+selection <- order(apply(vstData, 1, var), decreasing = T)[1:1000]
+data.subset <- vstData[selection, ]
+
+## Perform PCA on 1000 most variant genes
+pca <- prcomp(t(data.subset))
+percentVar <- pca$sdev ^ 2 / sum(pca$sdev ^ 2)
+
+data.pca <- data.frame('PC1' = pca$x[, 'PC1'],
+                       'PC2' = pca$x[, 'PC2'],
+                       'sampletype'  = meta$sampletype,
+                       'samplename'  = meta$samplename,
+                       'batch' = meta$batch)
+
+# Plot PCA, coloured by sampletype
+ggplot(data.pca, aes(x=PC1, y=PC2, colour=sampletype, label=batch)) + geom_point(size=2) + theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + 
+  xlab(paste0("PC1: ", round(percentVar[1] * 100), "% variance")) + ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) +
+  geom_text(vjust = 0, nudge_y=1.5) + ggtitle("PCA: variance between samples") + theme(plot.title = element_text(size = 20, face = "bold"))
+
+# Plot PCA, coloured by condition
+ggplot(data.pca, aes(x=PC1, y=PC2, colour=sampletype, label=samplename)) + geom_point(size=2) + theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + 
+  xlab(paste0("PC1: ", round(percentVar[1] * 100), "% variance")) + ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) +
+  geom_text(vjust = 0, nudge_y=1.5) + ggtitle("PCA: variance between samples") + theme(plot.title = element_text(size = 20, face = "bold"))
+
+```
+##PCA without batch effect
+
+```{r}
+vsd <- vst(dds, blind = TRUE, fitType = "parametric")
+assay(vsd) <- limma::removeBatchEffect(assay(vsd), vsd$batch)
+plotPCA(vsd, "batch") + theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+plotPCA(vsd, "samplename")
+
+df <- plotPCA(vsd, "sampletype")+ theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+plotPCA(vsd, "sampletype")+ theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+plotPCA(vsd, "sampletype") + geom_point(size = 6) + theme_bw() + theme(panel.border= element_rect(fill = NA, colour = "black"), text = element_text(size=20), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + scale_colour_manual(values = c("#4393C3", "#B2182B")) + ggtitle("PCA: Day 4 in culture") + theme(plot.title = element_text(size = 20, face = "bold",hjust = 0.5))  +theme(legend.title=element_blank())
+
+```
+
+#### Run DESeq2
+
+```{r}
+
+## Run DESeq2
+dds <- DESeq(dds, betaPrior=FALSE) # I suggest no LFC prior for interaction designs
+```
+
+# Hierarchical Clustering
+
+```{r}
+### Extract the rlog matrix from the object
+rld_mat <- assay(rld)    ## assay() is function from the "SummarizedExperiment" package that was loaded when you loaded DESeq2
+
+### Compute pairwise correlation values
+rld_cor <- cor(rld_mat)    ## cor() is a base R function
+
+#load pheatmap library
+### Plot heatmap
+pheatmap(rld_cor, annotation = meta[,c(1,2)]) #annotation has to be in a dataframe format
+
+#changing the color palet
+heat.colors <- brewer.pal(6, "Blues")
+pheatmap(rld_cor, annotation = meta[,c(1,2)], color = heat.colors, border_color=NA, fontsize = 10, 
+			fontsize_row = 10, height=20)
+
+```
+
+#### Results: SPT5 vs AAVS1 control
+
+```{r}
+## Define contrasts, extract results table, and shrink the log2 fold changes
+contrast_SPT5 <- c("sampletype", "SPT5", "AAVS1")
+
+#building the results table
+res_tableSPT5_T_unshrunken <- results(dds, contrast=contrast_SPT5, alpha = 0.05) #alpha is the significance cutoff used for optimizing the independent filtering (by default it is set to 0.1)
+
+#Shrunken fold changes
+res_tableSPT5_T <- lfcShrink(dds, contrast=contrast_SPT5, res=res_tableSPT5_T_unshrunken)
+#building the results table
+
+#plot MA
+plotMA(res_tableSPT5_T, ylim=c(-3,3),alpha = 0.05, main="SPT5 knockdown vs AAVS1 control")
+
+plotMA(res_tableSPT5_T_unshrunken, ylim=c(-3,3),alpha = 0.05, main="SPT5 knockdown vs AAVS1 control")
+```
+
+## Visualizing the results
+
+```{r}
+#Merge normalized_counts 
+normalized_counts <- normalized_count %>%
+  data.frame() %>%
+  rownames_to_column(var="gene")
+
+# Next, merge together (ensembl IDs) the normalized counts data frame with a subset of the annotables grcm38 data frame (only the columns for ensembl gene IDs and gene symbols)
+normalized_counts <- merge(normalized_counts, geneID2name, by = "gene")
+
+# Now create a tibble for the normalized counts
+normalized_counts <- normalized_counts %>%
+  as_tibble()
+
+colnames(normalized_counts) <- c("gene",samplename, "gene_name","description")
+
+#save table to open later
+write.csv(normalized_counts, file = "data/SizeFactorNormalized_countsDay4.csv")
+
+```
+
+#### Extracting significant differentially expressed genes
+
+```{r}
+### Set thresholds
+padj.cutoff <- 0.05
+
+res_tableSPT5_T_tb <- res_tableSPT5_T %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>% 
+  as_tibble()
+
+#subset that table to only keep the significant genes
+sigSPT5_T <- res_tableSPT5_T_tb %>%
+        filter(padj < padj.cutoff)
+
+sigSPT5_T_FC <- sigSPT5_T %>%
+        filter(log2FoldChange > 2 | log2FoldChange < -2)
+
+#save table to open later
+write.csv(sigSPT5_T, file = "results/SigDifferentiallyExpressedGenes.csv")
+write.csv(res_tableSPT5_T_tb, file = "results/resultsTable.csv")
+
+FCtable <- merge(sigSPT5_T_FC, normalized_counts, by = "gene")
+padjTable <- merge(sigSPT5_T, normalized_counts, by = "gene")
+write.csv(FCtable, file = "results/FCtableSigDifferentiallyExpressedGenes.csv")
+write.csv(padjTable, file = "results/padjresultsTable.csv")
+```
+
+## Plotting significant DE genes
+
+```{r}
+#*****************************************************
+#Using ggplot2 to plot multiple genes (e.g. top 20)
+
+## Order results by padj values
+top20_sigSPT5_T_genes <- res_tableSPT5_T_tb %>% 
+        arrange(padj) %>% 	#Arrange rows by padj values
+        pull(gene) %>% 		#Extract character vector of ordered genes
+        head(n=20)		#Extract the first 20 genes
+
+## normalized counts for top 20 significant genes
+top20_sigSPT5_T_genes <- data_frame(top20_sigSPT5_T_genes)
+colnames(top20_sigSPT5_T_genes) <- "gene"
+
+top20_sigSPT5_T_norm <- merge(normalized_counts, top20_sigSPT5_T_genes, by = "gene")
+
+# Gathering the columns to have normalized counts to a single column
+gathered_top20_sigSPT5_T <- top20_sigSPT5_T_norm %>%
+  gather(colnames(top20_sigSPT5_T_norm)[2:7], key = "samplename", value = "normalized_counts")
+
+gathered_top20_sigSPT5_T <- merge(meta, gathered_top20_sigSPT5_T, by.x = "row.names", by.y = "samplename")
+
+## plot using ggplot2
+ggplot(gathered_top20_sigSPT5_T) +
+        geom_point(aes(x = gene_name, y = normalized_counts, color = sampletype)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+	theme(plot.title = element_text(hjust = 0.5))
+
+#*****************************************************
+#Heatmap
+### Extract normalized expression for significant genes from the OE and control samples (2:4 and 7:9)
+normSPT5_Tsig <- normalized_counts %>% 
+              filter(gene %in% sigSPT5_T$gene) 
+
+### Set a color palette
+heat_colors <- brewer.pal(6, "YlOrRd")
+
+### Run pheatmap using the metadata data frame for the annotation
+pheatmap(normSPT5_Tsig[2:7],
+         main = "SPT5 KD",
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation = meta[,c(1,2)], 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 10, 
+         height = 20)
+
+#***************************************************
+#Volcano Plot
+
+## Obtain logical vector where TRUE values denote padj values < 0.05 and fold change > 1.5 in either direction
+
+res_tableSPT5_T_tb <- res_tableSPT5_T_tb %>% 
+                  mutate(thresholdSPT5_T = padj < 0.05)
+
+
+## Sort the results tibble by padj values and create a column to indicate which genes to label
+res_tableSPT5_T_tb <- res_tableSPT5_T_tb %>% arrange(padj) %>% mutate(genelabels = "")
+
+## Add the gene symbols as a column to the res_tableOE tibble from the grcm38 table (annotables)
+res_tableSPT5_T_tb <- bind_cols(res_tableSPT5_T_tb, symbol=grch38$symbol[match(res_tableSPT5_T_tb$gene, grch38$ensgene)])
+
+## Populate the genelables column with information from the new symbol column for only the first 10 rows
+res_tableSPT5_T_tb$genelabels[1:10] <- res_tableSPT5_T_tb$symbol[1:10]
+
+## Volcano plot with gene labels in plot
+ggplot(res_tableSPT5_T_tb, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(colour = thresholdSPT5_T)) +
+  geom_text_repel(aes(label = genelabels)) +
+  ggtitle("TGFbeta treated cells") +
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p-value") +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(size = rel(1.5), hjust = 0.5),
+        axis.title = element_text(size = rel(1.25))) 
+
+
+ggplot(res_tableSPT5_T_tb, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = thresholdSPT5_T),  alpha=0.3) +
+  scale_color_manual(values = c("red", "grey")) +
+  geom_vline(xintercept = 0) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = 1.3, linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  theme_bw(base_size = 12) + theme(legend.position = "bottom") +
+  geom_text_repel(
+    data = subset(res_tableSPT5_T_tb, genelabels != ""), aes(label = genelabels), size = 5, box.padding = unit(0.35, "lines"),point.padding = unit(0.3, "lines"))
+
+```
+
+
+

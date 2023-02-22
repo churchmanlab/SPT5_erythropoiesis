@@ -1,0 +1,244 @@
+---
+title: "Promoter Region Clustering"
+author: "Danya Martell Smart"
+date: '2019-05-09'
+output: html_document
+---
+
+**Description**: This script looks at genes that are clustered from the heatmap of the promoter region.
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE}
+
+knitr::opts_chunk$set(message = FALSE,        # Hide messages/warnings/errors from loading packages
+                      warning = FALSE,
+                      error = FALSE,
+                      cache = TRUE)           # By default, cache results to avoid re-running
+                                              # super long things every time you knit
+                      
+```
+
+# Load Libraries
+
+```{r, include=FALSE}
+# install.packages("abind")
+# BiocInstaller::biocLite('grimbough/biomaRt')
+# library(ggmin)
+# BiocManager::install("rols")
+#library(GO.db)
+#library("org.Hs.eg.db") # Look up gene information
+#library("rols") # Convert GO IDs to GO labels
+library(plyr) # For collapsing GO information
+library(dplyr)
+library(tidyr)
+library(DESeq2)
+library(gplots)
+library(biomaRt)
+library(abind)
+library(gridExtra)
+library("reshape2")
+library("ggplot2")
+library("pheatmap")
+library("dendextend")
+library("RColorBrewer")
+library(data.table)
+library(factoextra)
+library(ggsignif)
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+getPalette <-  colorRampPalette(brewer.pal(9, "Spectral"))
+cbPalette <- getPalette(12)
+
+donorPalette <- c("#56B4E9", "#0072B2")
+
+scale_rows = function(x){
+    m = apply(x, 1, mean, na.rm = T)
+    s = apply(x, 1, sd, na.rm = T)
+    return((x - m) / s)
+}
+
+```
+
+## Load files
+  
+```{r}
+Counts_ER <- read.csv(file = "counts/elongatingRegion_counts.csv", row.names = 1)
+Counts_PR <- read.csv(file = "counts/promoterRegion_counts.csv", row.names = 1)
+Counts_EG <- read.csv(file = "counts/entireGene_counts.csv", row.names = 1)
+```
+
+#### Add extra information to DESeq2 results:
+
+1) Retrieve the annotations from Biomart:  
+```{r}
+geneID2name <- read.csv(file = "geneID2name.csv", row.names = 1)
+
+# Read the BED file containing the protein-coding genes that don't overlap with snRNAs or snoRNAs
+PR_bed2 <- read.table("../../../Genomes/hg38/allPC_Genes_1.5kb.noOverlasnRNAsoRNA_PR.bed", sep="\t", header=F)
+colnames(PR_bed2) <- c("chr", "start", "end", "gene", "score", "strand")
+PRgenes <- data.frame(rownames(normCounts_PR_d))
+colnames(PRgenes)[1] <- "gene"
+PR_bed <- merge(PRgenes, PR_bed2, by = "gene")
+
+ER_bed2 <- read.table("../../../Genomes/hg38/allPC_Genes_1.5kb.noOverlasnRNAsoRNA_ER.bed", sep="\t", header=F)
+colnames(ER_bed2) <- c("chr", "start", "end", "gene", "score", "strand")
+ERgenes <- data.frame(rownames(normCounts_ER_d))
+colnames(ERgenes)[1] <- "gene"
+ER_bed <- merge(ERgenes, ER_bed2, by = "gene")
+
+EG_bed2 <- read.table("../../../Genomes/hg38/allPC_Genes.noOverlapsnRNAsnoRNA.bed", sep="\t", header=F)
+colnames(EG_bed2) <- c("chr", "start", "end", "gene", "score", "strand")
+EGgenes <- data.frame(rownames(Counts_EG))
+colnames(EGgenes)[1] <- "gene"
+EG_bed <- merge(EGgenes, EG_bed2, by = "gene")
+```
+
+##Get length normalized counts
+```{r}
+#First get gene length in kilobase units
+#kilobases
+ER_bed$length <- (ER_bed$end-ER_bed$start)/1000
+PR_bed$length <- (PR_bed$end-PR_bed$start)/1000
+EG_bed$length <- (EG_bed$end-EG_bed$start)/1000
+```
+## Get traveling ratio
+
+```{r}
+#Divide the read counts by the length of the promoter region
+normCounts_PR_l <- Counts_PR/PR_bed$length
+
+###normalize with size factor from drosophila spike-in
+sf <- c(1.6264891, 0.9281216,1.5550495, 0.8715548, 1.1891352, 0.5115079) #Transcription inhibitors DMSO_30_1 DMSO_30_2  DRB_30_1  DRB_30_2 TRIP_30_1 TRIP_30_2
+
+###Get per million scaling factor to normalize by TPM if not normalizing by drosophila spike-in, use TPM from entire gene so that it is the same scaling factor for the promoter and elongating regions and represents all read counts
+##Normaize by length
+#normCounts_EG <- Counts_EG/EG_bed$length
+##Then get per million scaling factor
+#pMs <-c(colSums(normCounts_EG)/1000000)
+#pMs
+
+##Normalize counts
+normCounts_PR <- sweep(normCounts_PR_l, 2, sf, `/`) #or PMs if not using drosophila spike-in
+
+### Get average PR count
+# seperate by donor
+PR_1 <- data.frame(normCounts_PR[,c(1,3:12)])
+PR_2 <- data.frame(normCounts_PR[,c(13,15:24)])
+# get average
+arr_normPR = abind(PR_1, PR_2, along = 3)
+norm_avgPR = rowMeans(arr_normPR, dims = 2)
+norm_avgPR = as.data.frame(norm_avgPR)
+
+#Divide the read counts by the length of the promoter region
+norm_avgPR <- norm_avgPR/PR_bed$length
+
+
+#Divide the read counts by the length of the elongating region
+normCounts_ER_l <- Counts_ER/ER_bed$length
+
+##Normalize counts
+normCounts_ER <- sweep(normCounts_ER_l, 2, sf, `/`) #or PMs if not using drosophila spike-in
+
+## Get average ER count
+# seperate by donor
+ER_1 <- data.frame(normCounts_ER[,c(1,3:12)])
+ER_2 <- data.frame(normCounts_ER[,c(13,15:24)])
+# get average
+arr_normER = abind(ER_1, ER_2, along = 3)
+norm_avgER = rowMeans(arr_normER, dims = 2)
+norm_avgER = as.data.frame(norm_avgER)
+
+### add pseudocount when looking at pausing across differentiation to capture genes that are paused but not expressed
+#ER_scale2 <- ER_scale + .5 
+ER_scale2 <- ER_scale
+
+# Get traveling ratio
+TR <-norm_avgPR/ER_scale2
+# summary(TR_norm)
+
+TR <- data.frame(rownames(TR), TR)
+colnames(TR) <- c("gene", "D00", "D02", "D03", "D04", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+#write.csv(TR_norm, "../Figure_1_files/TRnorm_all.csv")
+
+```
+
+### Threshold 
+#by PI
+#by promoter region counts
+
+```{r}
+
+# Filter for pause index (traveling ratio)
+TR_filter <- subset(TR, rowSums(TR[-1]<=2)!=ncol(TR[-1])) #or 4 if looking at highly paused genes
+TR_filter_genes <- data.frame(rownames(TR_filter))
+colnames(TR_filter_genes) <- "gene"
+
+# Filter for counts in promoter region
+PR_filter <- subset(normCounts_PR_d2, rowSums(normCounts_PR_d2<=3)!=ncol(normCounts_PR_d2))
+PR_filter_genes <- data.frame(rownames(PR_filter))
+colnames(PR_filter_genes) <- "gene"
+
+#merge threshold
+TR_good1 <- data.frame(TR_filter_genes[which(TR_filter_genes$gene %in% res_ann_expressed_PR$gene),])
+colnames(TR_good1) <- "gene"
+TR_good1 <- merge(TR_good1, PR_filter_genes, by = "gene")
+
+```
+
+##Plot TR
+
+```{r}
+### Set a color palette
+heat_colors <- rev(brewer.pal(8, "RdBu"))
+
+## Plot heatmap of TR
+test <- merge(TR, TR_good1, by = "gene")
+TR_map <- test[,2:12]
+rownames(TR_map) <- test[,1]
+pheatmap(TR_map, 
+         show_rownames=F, cluster_cols=F, cluster_rows=T, scale="row",
+         cex=1, clustering_distance_rows="euclidean",
+         clustering_method="ward.D", cutree_rows = 4, color = heat_colors, border_color=FALSE)
+#write.csv(TR_map, "../Figure_1_files/TR_heatmap.csv") 
+
+df <- scale_rows(TR_map)
+# Elbow method
+fviz_nbclust(df, kmeans, method = "gap_stat")+
+  labs(subtitle = "gap stat method")
+# silhouette method
+fviz_nbclust(df, kmeans, method = "silhouette")+
+  labs(subtitle = "silhouette method")
+# Elbow method
+fviz_nbclust(df, kmeans, method = "wss") +
+    geom_vline(xintercept = 4, linetype = 2) +
+  labs(subtitle = "Elbow method")
+
+## Cut tree
+out <- pheatmap(TR_map,
+                show_rownames=F, cluster_cols=F, cluster_rows=T, scale="row",
+                cex=1, clustering_distance_rows="euclidean",
+                clustering_method="ward.D", color = heat_colors, cutree_rows = 4,border_color=FALSE)
+#ward.D, ward.D2, single, complete, average, mcquitty, median or centroid
+
+## Making file with clusters, z scores, and gene names
+TR_clusters <- data.frame(sort(cutree(out$tree_row, k = 4)))
+TR_clusters <- data.frame(rownames(TR_clusters),TR_clusters)
+colnames(TR_clusters) <- c("gene", "cluster")
+
+## Getting z-scores from heatmap input
+scale_rows = function(x){
+  m = apply(x, 1, mean, na.rm = T)
+  s = apply(x, 1, sd, na.rm = T)
+  return((x - m) / s)
+}
+
+TR_zScores <- scale_rows(TR_map)
+TR_zScores <- data.frame(rownames(TR_zScores), TR_zScores)
+colnames(TR_zScores) <- c("gene", "zD0", "zD2", "zD3", "zD4", "zD5", "zD6", "zD7", "zD8", "zD9", "zD10", "zD11")
+TR_zScores2 <- merge(TR_clusters, TR_zScores, by = "gene")
+TR_zScores2 <- merge(TR_zScores2, geneID2name, by = "gene")
+#write.csv(TR_zScores2, "../Figure_1_files/TR_zScores_heatmap.csv") 
+
+```
