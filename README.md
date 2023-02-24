@@ -26,3 +26,7 @@ functional_analysis.Rmd
 ### Further NET-seq data analysis, metagene and pausing index:
 
 PI_Jan2023.Rmd, Metagene_Plotting_Final.R
+
+### Plot deepTools matrices for the HBB gene over the course of erythropoiesis:
+
+Plotting_HBB_Reads_Final.R
